@@ -1,93 +1,148 @@
 #include <Arduino.h>
+#include <ESP32Encoder.h>
 
-const int PIN_A = 5; // CONFIRM this matches your current wiring
-const int PIN_B = 4;
+ESP32Encoder encoder;
 
-const unsigned long DEBOUNCE_US = 4000; // 4ms per-pin debounce, in microseconds
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <OneButton.h>
+#include <SPI.h>
 
-volatile unsigned long lastAcceptedA = 0;
-volatile unsigned long lastAcceptedB = 0;
+// Pin configuration for ESP32
+#define TFT_CS 26
+#define TFT_DC 25
+#define TFT_RST 33
+#define TFT_MOSI 23
+#define TFT_SCK 22
+#define BUTTON_PIN 32
 
-// simple circular log buffer, filled in ISR, printed in loop
-#define LOG_SIZE 100
-volatile char logPin[LOG_SIZE];
-volatile int logLevel[LOG_SIZE];
-volatile unsigned long logTime[LOG_SIZE];
-volatile int logHead = 0;
-volatile int logCount = 0;
+int encodercount;
+int prev_encodercount;
 
-void IRAM_ATTR logEvent(char pin, int level, unsigned long t)
+int menuScreenSelector = 0;
+
+// Used to know whether the encoder has moved from the last measurement
+// +1 : Encoder has moved in positive direction
+// -1 : Encoder has moved in negative direction
+// 0  : No movement detected
+int encoder_delta;
+
+OneButton btnSelect;
+
+// Create display object (pass pins in constructor)
+Adafruit_ST7789 tft =
+    Adafruit_ST7789(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCK, TFT_RST);
+
+// Enum to keep track of the current screen
+enum Screen
 {
-  logPin[logHead] = pin;
-  logLevel[logHead] = level;
-  logTime[logHead] = t;
-  logHead = (logHead + 1) % LOG_SIZE;
-  if (logCount < LOG_SIZE)
-    logCount++;
+  MENU,
+  SETTINGS,
+  TIMER
+};
+Screen currentScreen = MENU;
+
+void setScreen(Screen screen)
+{
+  tft.fillScreen(ST77XX_BLACK);
+  currentScreen = screen;
 }
 
-void IRAM_ATTR ISR_A()
-{
-  unsigned long now = micros();
-  if (now - lastAcceptedA < DEBOUNCE_US)
-    return; // ignore bounce on THIS pin only
-  lastAcceptedA = now;
-
-  logEvent('A', digitalRead(PIN_A), now);
-}
-
-void IRAM_ATTR ISR_B()
-{
-  unsigned long now = micros();
-  if (now - lastAcceptedB < DEBOUNCE_US)
-    return; // ignore bounce on THIS pin only
-  lastAcceptedB = now;
-
-  logEvent('B', digitalRead(PIN_B), now);
-}
+void handleSelectButtonPress() { Serial.println("Button pressed"); }
 
 void setup()
 {
+
   Serial.begin(115200);
-  delay(2000);
 
-  pinMode(PIN_A, INPUT_PULLUP);
-  pinMode(PIN_B, INPUT_PULLUP);
+  btnSelect.setup(BUTTON_PIN, INPUT_PULLUP, true);
+  btnSelect.setClickMs(200);
+  btnSelect.attachClick(handleSelectButtonPress);
 
-  attachInterrupt(digitalPinToInterrupt(PIN_A), ISR_A, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(PIN_B), ISR_B, CHANGE);
+  // Enable the weak pull down resistors
 
-  Serial.println("Encoder Order Test Started (debounced). Turn the wheel slowly one click at a time.");
+  // Initialize display
+  tft.init(240, 320); // Set resolution (adjust if needed)
+  tft.setRotation(1);
+
+  // Vedere quanto posso abbassarlo prima che dia problemi
+  // tft.setSPISpeed(100000000);
+
+  // Test
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(2);
+  // tft.setCursor(10, 10);
+  // tft.println("ST7789V Works!");
+  // ESP32Encoder::useInternalWeakPullResistors = puType::down;
+
+  //  Enable the weak pull up resistors
+  ESP32Encoder::useInternalWeakPullResistors = puType::up;
+
+  // encoder setup
+  encoder.attachHalfQuad(4, 5);
+  encoder.setCount(0);
+}
+
+void handleMenuScreen(int encoder_delta)
+{
+
+  menuScreenSelector += encoder_delta;
+
+  tft.setCursor(10, 10);
+  tft.println("Menu Screen");
+
+  tft.setCursor(10, 30);
+  tft.fillRect(10, 30, 50, 50, ST77XX_BLACK);
+  tft.println(menuScreenSelector);
+
+  if (menuScreenSelector < 0)
+  {
+    setScreen(TIMER);
+  }
+}
+
+void handleTimerScreen(int encoder_delta)
+{
+  tft.setCursor(10, 30);
+  tft.println("Timer Screen");
+  esp_deep_sleep_start();
+
+  tft.setCursor(10, 30);
+  tft.fillRect(10, 30, 50, 50, ST77XX_BLACK);
+  tft.println(menuScreenSelector);
+
+  if (menuScreenSelector < 0)
+  {
+    setScreen(MENU);
+  }
 }
 
 void loop()
 {
-  static int printedIndex = 0;
+  // tick buttons otherwise they won't work
+  btnSelect.tick();
 
-  noInterrupts();
-  int currentCount = logCount;
-  int currentHead = logHead;
-  interrupts();
-
-  while (printedIndex < currentCount)
+  encodercount = encoder.getCount();
+  if (prev_encodercount != encodercount)
   {
-    int idx = (currentHead - currentCount + printedIndex + LOG_SIZE) % LOG_SIZE;
-    Serial.print(logTime[idx]);
-    Serial.print(" us | pin ");
-    Serial.print(logPin[idx]);
-    Serial.print(" -> ");
-    Serial.println(logLevel[idx]);
-    printedIndex++;
+    encoder_delta = encoder.getCount() - prev_encodercount;
+    prev_encodercount = encodercount;
+  }
+  else
+  {
+    encoder_delta = 0;
   }
 
-  if (printedIndex >= LOG_SIZE)
-  {
-    noInterrupts();
-    logHead = 0;
-    logCount = 0;
-    interrupts();
-    printedIndex = 0;
-  }
+  // delay(100);
 
-  delay(20);
+  switch (currentScreen)
+  {
+  case MENU:
+    handleMenuScreen(encoder_delta);
+    break;
+  case TIMER:
+    handleTimerScreen(encoder_delta);
+    break;
+  }
 }
